@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Token Buddy.
 
-Reversibly tokenises:
-- exact custom keyword terms from a local text file (case-insensitive matching)
-- whole-cell IPv4, IPv6, CIDR, and FQDN values in every column except See Also
-- validated IPv4/CIDR values in text, URL hostnames, and DNS-resolution hostnames
+Reversibly tokenises sensitive values in UTF-8 CSV files while keeping the
+local token map separate from the sanitised output.
 
-The token map is readable local JSON and contains the original values. Keep it local.
-The script performs no network activity and uses only the Python standard library.
+Custom terms are literal, case-insensitive substring matches. This is
+intentional: a term such as ``example`` is redacted in ``un_example_001``,
+``-example``, and ``examplewifi``.
+
+The script performs no network activity and uses only the Python standard
+library.
 """
 
 from __future__ import annotations
@@ -22,13 +24,13 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Match, Optional, Pattern, Tuple
+from typing import Callable, Dict, List, Match, Optional, Pattern, Tuple
 
 # Recognises placeholders created by this script, for example <<IP_0001>>.
 TOKEN_RE = re.compile(r"<<([A-Z0-9_]+)_([0-9]{4,})>>")
 
 BANNER = r"""
- _____ ___  _  _______ _   _   ____  _   _ ____  ______   __
+ _____ ___  _  _______ _   _   ____  _   _ ____  ______ __
 |_   _/ _ \| |/ / ____| \ | | | __ )| | | |  _ \|  _ \ \ / /
   | || | | | ' /|  _| |  \| | |  _ \| | | | | | | | | \ V /
   | || |_| | . \| |___| |\  | | |_) | |_| | |_| | |_| || |
@@ -41,13 +43,14 @@ TOKEN_TYPE_SET = frozenset(TOKEN_TYPES)
 # Tenable reference/advisory URLs remain exactly as exported.
 SEE_ALSO_COLUMN = "see also"
 
-# Inline matching is deliberately limited to high-confidence contexts. The script does not
-# run a broad FQDN/IPv6 search over arbitrary prose because filenames and programming syntax
-# can look identical to those identifiers.
+# Inline matching is deliberately limited to high-confidence contexts. The
+# script does not run a broad FQDN/IPv6 search over arbitrary prose because
+# filenames and programming syntax can look identical to those identifiers.
 FQDN_CANDIDATE = (
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 )
+
 INLINE_IPV4_CIDR_RE = re.compile(
     r"(?<![\w.])(?P<value>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2})(?![\w/.])"
 )
@@ -104,16 +107,20 @@ class TokenMap:
 
         if not isinstance(data, dict):
             fail("token map has invalid structure")
+
         mappings = data.get("mappings")
         counters = data.get("counters")
         if not isinstance(mappings, dict) or not isinstance(counters, dict):
             fail("token map has invalid structure")
+
         legacy_types = {"IP", "IPV6", "CIDR", "FQDN", "ORG"}
         if set(mappings) == legacy_types and set(counters) == legacy_types:
             fail(
-                "token map uses legacy ORG placeholders. Use the earlier ORG script to detokenize it, "
+                "token map uses legacy ORG placeholders. "
+                "Use the earlier ORG script to detokenize it, "
                 "or create a new map with this KEYWORD version"
             )
+
         if set(mappings) != TOKEN_TYPE_SET or set(counters) != TOKEN_TYPE_SET:
             fail("token map has unsupported token namespaces")
 
@@ -133,13 +140,16 @@ class TokenMap:
             for original, token in entries.items():
                 if not isinstance(original, str) or not isinstance(token, str):
                     fail("token map has non-text mapping entries")
+
                 match = TOKEN_RE.fullmatch(token)
                 if match is None or match.group(1) != token_type:
                     fail("token map has invalid placeholder format")
+
                 number = int(match.group(2))
                 if number == 0:
                     fail("token map has invalid placeholder numbering")
                 highest_number = max(highest_number, number)
+
                 previous = token_map.by_token.get(token)
                 if previous is not None and previous != original:
                     fail("token map has duplicate placeholder conflict")
@@ -147,6 +157,7 @@ class TokenMap:
 
             if counter < highest_number:
                 fail("token map counter is lower than an existing placeholder")
+
             token_map.by_type[token_type] = dict(entries)
             token_map.counters[token_type] = counter
 
@@ -169,6 +180,7 @@ class TokenMap:
     def get_token(self, token_type: str, original: str) -> str:
         if token_type not in TOKEN_TYPE_SET:
             raise ValueError("unsupported token type")
+
         existing = self.by_type[token_type].get(original)
         if existing is not None:
             return existing
@@ -185,13 +197,18 @@ class TokenMap:
 
     def validate(self) -> Tuple[bool, str]:
         seen: Dict[str, str] = {}
+
         if set(self.by_type) != TOKEN_TYPE_SET or set(self.counters) != TOKEN_TYPE_SET:
             return False, "unsupported token namespace found"
 
         for token_type in TOKEN_TYPES:
             entries = self.by_type[token_type]
             counter = self.counters[token_type]
-            if not isinstance(entries, dict) or not isinstance(counter, int) or isinstance(counter, bool):
+            if (
+                not isinstance(entries, dict)
+                or not isinstance(counter, int)
+                or isinstance(counter, bool)
+            ):
                 return False, "invalid token map namespace state found"
             if counter < 0:
                 return False, "negative token counter found"
@@ -200,13 +217,16 @@ class TokenMap:
             for original, token in entries.items():
                 if not isinstance(original, str) or not isinstance(token, str):
                     return False, "non-text mapping entry found"
+
                 match = TOKEN_RE.fullmatch(token)
                 if match is None or match.group(1) != token_type:
                     return False, "invalid placeholder format found"
+
                 number = int(match.group(2))
                 if number == 0:
                     return False, "invalid placeholder numbering found"
                 highest_number = max(highest_number, number)
+
                 if token in seen and seen[token] != original:
                     return False, "duplicate placeholder conflict found"
                 seen[token] = original
@@ -219,18 +239,23 @@ class TokenMap:
         for token, original in seen.items():
             if self.by_token.get(token) != original:
                 return False, "reverse mapping mismatch found"
+
         return True, "ok"
 
 
 @dataclass(frozen=True)
-class CustomTerm:
+class CustomTerms:
+    """Combined literal matcher for all configured custom terms."""
+
     pattern: Pattern[str]
+    count: int
 
 
 def atomic_write_text(path: Path, text: str, encoding: str) -> None:
     """Write to a temporary file, then replace the destination in one step."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name: Optional[str] = None
+
     try:
         with tempfile.NamedTemporaryFile(
             "w",
@@ -244,6 +269,7 @@ def atomic_write_text(path: Path, text: str, encoding: str) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
             tmp_name = tmp.name
+
         os.replace(tmp_name, path)
         try:
             os.chmod(path, 0o600)
@@ -275,6 +301,7 @@ def detect_encoding(path: Path) -> Tuple[str, bool, str]:
     else:
         # A one-line CSV has no observable source line ending; use standard CSV output.
         lineterminator = "\r\n"
+
     return ("utf-8-sig" if has_bom else "utf-8"), has_bom, lineterminator
 
 
@@ -305,16 +332,20 @@ def is_valid_cidr(value: str) -> bool:
 
 
 def is_valid_fqdn(value: str) -> bool:
-    """Accept a conservative ASCII DNS name with at least one dot.
-
-    This is deliberately used only for whole values in recognised host/address columns.
-    It is not used to scan arbitrary prose, filenames, or URLs.
-    """
-    if not value or len(value) > 253 or value.endswith(".") or not value.isascii() or "." not in value:
+    """Accept a conservative ASCII DNS name with at least one dot."""
+    if (
+        not value
+        or len(value) > 253
+        or value.endswith(".")
+        or not value.isascii()
+        or "." not in value
+    ):
         return False
+
     labels = value.split(".")
     if len(labels) < 2 or not any(char.isalpha() for char in value):
         return False
+
     for label in labels:
         if not (1 <= len(label) <= 63):
             return False
@@ -322,32 +353,19 @@ def is_valid_fqdn(value: str) -> bool:
             return False
         if not all(char.isalnum() or char == "-" for char in label):
             return False
+
     return True
 
 
-def mask_existing_placeholders(text: str) -> Tuple[str, Dict[str, str]]:
-    """Hide known-looking placeholders while other matching runs."""
-    masks: Dict[str, str] = {}
+def load_custom_terms(path_arg: Optional[str]) -> Optional[CustomTerms]:
+    """Load literal case-insensitive substring terms, longest first.
 
-    def repl(match: Match[str]) -> str:
-        marker = f"\uE000PH{len(masks)}\uE001"
-        masks[marker] = match.group(0)
-        return marker
-
-    return TOKEN_RE.sub(repl, text), masks
-
-
-def unmask_placeholders(text: str, masks: Dict[str, str]) -> str:
-    for marker, original in masks.items():
-        text = text.replace(marker, original)
-    return text
-
-
-def load_custom_terms(path_arg: Optional[str]) -> List[CustomTerm]:
-    """Load case-insensitive literal terms, longest first, from a local text file."""
+    Terms are deliberately matched inside compound identifiers. For example,
+    ``example`` matches ``un_example_001``, ``-example``, and ``examplewifi``.
+    """
     path = Path(path_arg) if path_arg else Path.cwd() / "redact_terms.txt"
     if not path.exists():
-        return []
+        return None
 
     try:
         raw_terms = [
@@ -366,28 +384,29 @@ def load_custom_terms(path_arg: Optional[str]) -> List[CustomTerm]:
             seen.add(key)
             terms.append(term)
 
-    compiled: List[CustomTerm] = []
-    for term in terms:
-        literal = re.escape(term)
-        starts_word = term[0].isalnum() or term[0] == "_"
-        ends_word = term[-1].isalnum() or term[-1] == "_"
-        if any(char.isspace() for char in term):
-            # Phrases may naturally end before punctuation, for example "Acme Corporation.".
-            prefix = r"(?<!\w)" if starts_word else ""
-            suffix = r"(?!\w)" if ends_word else ""
-        else:
-            # Single-label terms should not match inside DNS labels or hyphenated identifiers.
-            prefix = r"(?<![\w.-])" if starts_word else ""
-            suffix = r"(?![\w-]|\.(?=[A-Za-z0-9-]))" if ends_word else ""
-        compiled.append(CustomTerm(re.compile(prefix + literal + suffix, re.IGNORECASE)))
-    return compiled
+    if not terms:
+        return None
+
+    # A single longest-first regex prevents a shorter configured term from
+    # winning over a longer term at the same location. It also avoids scanning
+    # placeholders created by an earlier per-term replacement pass.
+    pattern = re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
+    return CustomTerms(pattern=pattern, count=len(terms))
 
 
-def tokenise_custom_terms(text: str, terms: List[CustomTerm], token_map: TokenMap) -> str:
-    """Apply user terms first; the exact spelling found is kept for exact restoration."""
-    for term in terms:
-        text = term.pattern.sub(lambda match: token_map.get_token("KEYWORD", match.group(0)), text)
-    return text
+def tokenise_custom_terms(
+    text: str,
+    terms: Optional[CustomTerms],
+    token_map: TokenMap,
+) -> str:
+    """Tokenise configured literal substrings while retaining exact restoration."""
+    if terms is None:
+        return text
+
+    return terms.pattern.sub(
+        lambda match: token_map.get_token("KEYWORD", match.group(0)),
+        text,
+    )
 
 
 def replace_stripped_value(original: str, replacement: str) -> str:
@@ -398,11 +417,9 @@ def replace_stripped_value(original: str, replacement: str) -> str:
 
 
 def tokenise_whole_cell_identifier(text: str, token_map: TokenMap) -> str:
-    """Tokenise a complete IP, IPv6, CIDR, or FQDN cell in any non-See-Also column.
+    """Tokenise a complete IP, IPv6, CIDR, or FQDN cell.
 
-    This intentionally does not search inside longer prose. For example, a cell equal to
-    ``server.example.com`` is tokenised, while ``Connect to server.example.com`` is left
-    unchanged. This avoids broad free-text regex matching.
+    This intentionally does not search for an arbitrary FQDN/IPv6 inside prose.
     """
     stripped = text.strip()
     if not stripped or TOKEN_RE.fullmatch(stripped):
@@ -424,14 +441,17 @@ def tokenise_whole_cell_identifier(text: str, token_map: TokenMap) -> str:
 
 def tokenise_inline_url_hosts(text: str, token_map: TokenMap) -> str:
     """Tokenise validated hostname/IP literals in standard HTTP(S)/FTP URLs only."""
+
     def repl(match: Match[str]) -> str:
         prefix = match.group("prefix")
         raw_host = match.group("host")
+
         if raw_host.startswith("[") and raw_host.endswith("]"):
             value = raw_host[1:-1]
             if is_valid_ipv6(value):
                 return f"{prefix}[{token_map.get_token('IPV6', value)}]"
             return match.group(0)
+
         if is_valid_ipv4(raw_host):
             return f"{prefix}{token_map.get_token('IP', raw_host)}"
         if is_valid_fqdn(raw_host):
@@ -442,7 +462,8 @@ def tokenise_inline_url_hosts(text: str, token_map: TokenMap) -> str:
 
 
 def tokenise_labelled_identifiers(text: str, token_map: TokenMap) -> str:
-    """Tokenise one exact value after a known host/address label at the start of a line."""
+    """Tokenise one value after a recognised host/address label at line start."""
+
     def repl(match: Match[str]) -> str:
         value = match.group("value")
         if is_valid_ipv4(value):
@@ -461,7 +482,8 @@ def tokenise_labelled_identifiers(text: str, token_map: TokenMap) -> str:
 
 
 def tokenise_inline_ipv4_cidrs(text: str, token_map: TokenMap) -> str:
-    """Tokenise validated IPv4 CIDRs embedded in text without taking partial matches."""
+    """Tokenise validated IPv4 CIDRs embedded in text without partial matches."""
+
     def repl(match: Match[str]) -> str:
         value = match.group("value")
         return token_map.get_token("CIDR", value) if is_valid_cidr(value) else value
@@ -470,7 +492,8 @@ def tokenise_inline_ipv4_cidrs(text: str, token_map: TokenMap) -> str:
 
 
 def tokenise_inline_ipv4(text: str, token_map: TokenMap) -> str:
-    """Tokenise validated IPv4 literals embedded in text without taking partial matches."""
+    """Tokenise validated IPv4 literals embedded in text without partial matches."""
+
     def repl(match: Match[str]) -> str:
         value = match.group("value")
         return token_map.get_token("IP", value) if is_valid_ipv4(value) else value
@@ -480,6 +503,7 @@ def tokenise_inline_ipv4(text: str, token_map: TokenMap) -> str:
 
 def tokenise_resolved_fqdns(text: str, token_map: TokenMap) -> str:
     """Tokenise a validated FQDN only in clear DNS-resolution phrasing."""
+
     def repl(match: Match[str]) -> str:
         host = match.group("host")
         if not is_valid_fqdn(host):
@@ -489,22 +513,49 @@ def tokenise_resolved_fqdns(text: str, token_map: TokenMap) -> str:
     return RESOLVES_FQDN_RE.sub(repl, text)
 
 
-def tokenise_cell(value: str, column_name: str, token_map: TokenMap, terms: List[CustomTerm]) -> str:
-    """Tokenise explicit identifiers in one CSV cell while preserving See Also unchanged."""
+def transform_outside_existing_placeholders(
+    text: str,
+    transform: Callable[[str], str],
+) -> str:
+    """Apply a transform around, never inside, existing <<...>> placeholders."""
+    pieces: List[str] = []
+    previous_end = 0
+
+    for match in TOKEN_RE.finditer(text):
+        pieces.append(transform(text[previous_end:match.start()]))
+        pieces.append(match.group(0))
+        previous_end = match.end()
+
+    pieces.append(transform(text[previous_end:]))
+    return "".join(pieces)
+
+
+def tokenise_cell(
+    value: str,
+    column_name: str,
+    token_map: TokenMap,
+    terms: Optional[CustomTerms],
+) -> str:
+    """Tokenise identifiers in one CSV cell while preserving See Also unchanged."""
     if value == "" or normalise_col(column_name) == SEE_ALSO_COLUMN:
         return value
 
-    masked, masks = mask_existing_placeholders(value)
-    # Structured identifiers run before custom terms so a company term inside a complete
-    # hostname becomes one FQDN token rather than a partial replacement.
-    text = tokenise_whole_cell_identifier(masked, token_map)
+    # Structured identifiers take precedence, so a complete FQDN or URL host
+    # becomes one FQDN token rather than a partial custom-term replacement.
+    text = tokenise_whole_cell_identifier(value, token_map)
     text = tokenise_inline_url_hosts(text, token_map)
     text = tokenise_labelled_identifiers(text, token_map)
     text = tokenise_inline_ipv4_cidrs(text, token_map)
     text = tokenise_inline_ipv4(text, token_map)
     text = tokenise_resolved_fqdns(text, token_map)
-    text = tokenise_custom_terms(text, terms, token_map)
-    return unmask_placeholders(text, masks)
+
+    # Existing and newly created placeholders must never be altered. Segmenting
+    # is safer than temporary marker text because a user may configure any
+    # literal term, including text that could occur in a marker.
+    return transform_outside_existing_placeholders(
+        text,
+        lambda segment: tokenise_custom_terms(segment, terms, token_map),
+    )
 
 
 def find_placeholders(text: str) -> List[str]:
@@ -524,11 +575,13 @@ def unknown_placeholders_in_rows(rows: List[Dict[str, str]], token_map: TokenMap
 
 def read_csv_rows(path: Path) -> Tuple[List[Dict[str, str]], List[str], bool, str]:
     encoding, has_bom, lineterminator = detect_encoding(path)
+
     try:
         with path.open("r", encoding=encoding, newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 fail("input CSV has no header row")
+
             fieldnames = list(reader.fieldnames)
             if any(not isinstance(name, str) or not name.strip() for name in fieldnames):
                 fail("input CSV contains an empty header name")
@@ -540,6 +593,7 @@ def read_csv_rows(path: Path) -> Tuple[List[Dict[str, str]], List[str], bool, st
                 if None in row:
                     fail("input CSV has row(s) with more fields than the header")
                 rows.append({field: (row.get(field) or "") for field in fieldnames})
+
             return rows, fieldnames, has_bom, lineterminator
     except UnicodeDecodeError:
         fail("input CSV must be UTF-8 or UTF-8 with BOM")
@@ -559,6 +613,7 @@ def write_csv_rows(
     encoding = "utf-8-sig" if use_bom else "utf-8"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name: Optional[str] = None
+
     try:
         with tempfile.NamedTemporaryFile(
             "w",
@@ -579,6 +634,7 @@ def write_csv_rows(
             tmp.flush()
             os.fsync(tmp.fileno())
             tmp_name = tmp.name
+
         os.replace(tmp_name, path)
     finally:
         if tmp_name:
@@ -605,17 +661,17 @@ def refuse_path_collisions(input_path: Path, output_path: Path, map_path: Path) 
 
 
 def default_tokenize_output_path(input_path: Path) -> Path:
-    """Return <input-stem>_sanitised.csv beside the input CSV."""
+    """Return _sanitised.csv beside the input CSV."""
     return input_path.with_name(f"{input_path.stem}_sanitised.csv")
 
 
 def default_token_map_path(input_path: Path) -> Path:
-    """Return <input-stem>_token_map.json beside the input CSV."""
+    """Return _token_map.json beside the input CSV."""
     return input_path.with_name(f"{input_path.stem}_token_map.json")
 
 
 def default_detokenize_output_path(input_path: Path) -> Path:
-    """Return <input-stem>_restored.csv beside the input CSV."""
+    """Return _restored.csv beside the input CSV."""
     return input_path.with_name(f"{input_path.stem}_restored.csv")
 
 
@@ -623,6 +679,7 @@ def command_tokenize(args: argparse.Namespace) -> None:
     input_path = Path(args.input)
     output_path = Path(args.output) if args.output else default_tokenize_output_path(input_path)
     map_path = Path(args.map) if args.map else default_token_map_path(input_path)
+
     refuse_path_collisions(input_path, output_path, map_path)
     if not input_path.is_file():
         fail("input file does not exist")
@@ -638,6 +695,7 @@ def command_tokenize(args: argparse.Namespace) -> None:
 
     terms = load_custom_terms(args.terms_file)
     rows, fieldnames, has_bom, lineterminator = read_csv_rows(input_path)
+
     if unknown_placeholders_in_rows(rows, token_map):
         fail("input CSV contains placeholder(s) not present in the local token map")
 
@@ -659,17 +717,23 @@ def command_tokenize(args: argparse.Namespace) -> None:
     # Write the map first: a tokenised CSV without its map cannot be restored.
     token_map.save(map_path)
     write_csv_rows(output_path, output_rows, fieldnames, has_bom, lineterminator)
+
     print(f"Sanitised CSV written: {output_path}")
     print(f"Local token map written: {map_path} ({token_map.count()} mappings).")
     print("WARNING: The local token map contains original sensitive values. Do not upload or share it.")
+
     if args.verbose:
-        print(f"Verbose: rows processed={len(rows)}, cells changed={changed_cells}, custom terms loaded={len(terms)}")
+        print(
+            f"Verbose: rows processed={len(rows)}, cells changed={changed_cells}, "
+            f"custom terms loaded={terms.count if terms is not None else 0}"
+        )
 
 
 def command_detokenize(args: argparse.Namespace) -> None:
     input_path = Path(args.input)
     output_path = Path(args.output) if args.output else default_detokenize_output_path(input_path)
     map_path = Path(args.map)
+
     refuse_path_collisions(input_path, output_path, map_path)
     if not input_path.is_file():
         fail("input file does not exist")
@@ -678,6 +742,7 @@ def command_detokenize(args: argparse.Namespace) -> None:
 
     token_map = TokenMap.load(map_path)
     rows, fieldnames, has_bom, lineterminator = read_csv_rows(input_path)
+
     unknown: set[str] = set()
 
     def repl(match: Match[str]) -> str:
@@ -693,6 +758,7 @@ def command_detokenize(args: argparse.Namespace) -> None:
         for row in rows
     ]
     write_csv_rows(output_path, output_rows, fieldnames, has_bom, lineterminator)
+
     print(f"Detokenised CSV written: {output_path}")
     print(f"Unknown placeholders left unchanged: {len(unknown)}.")
     if args.verbose:
@@ -703,11 +769,14 @@ def command_validate_map(args: argparse.Namespace) -> None:
     map_path = Path(args.map)
     if not map_path.is_file():
         fail("token map does not exist")
+
     token_map = TokenMap.load(map_path)
     ok, reason = token_map.validate()
     if not ok:
         fail(f"token map validation failed: {reason}")
-    print(f"Token map validation ok. {token_map.count()} mappings present. No sensitive values displayed.")
+
+    print(f"Token map validation ok. {token_map.count()} mappings present.")
+    print("No sensitive values displayed.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -728,6 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Keep the JSON token map local. It contains the original values."
         ),
     )
+
     commands = parser.add_subparsers(
         dest="command",
         required=True,
@@ -763,12 +833,12 @@ def build_parser() -> argparse.ArgumentParser:
     tokenize.add_argument(
         "--output",
         metavar="CSV",
-        help="Optional output CSV path (default: <input>_sanitised.csv)",
+        help="Optional output CSV path (default: _sanitised.csv)",
     )
     tokenize.add_argument(
         "--map",
         metavar="JSON",
-        help="Optional local map path (default: <input>_token_map.json)",
+        help="Optional local map path (default: _token_map.json)",
     )
     tokenize.add_argument(
         "--reuse-map",
@@ -778,7 +848,11 @@ def build_parser() -> argparse.ArgumentParser:
     tokenize.add_argument(
         "--terms-file",
         metavar="TXT",
-        help="Optional keyword file; one literal term per line, case-insensitive; values become <<KEYWORD_####>> (default: ./redact_terms.txt if present)",
+        help=(
+            "Optional literal-term file; one term per line, case-insensitive; "
+            "values become <<KEYWORD_0001>> "
+            "(default: ./redact_terms.txt if present)"
+        ),
     )
     tokenize.add_argument(
         "--verbose",
@@ -798,7 +872,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Example:\n"
             "  %(prog)s --input ai_output.csv --map test_token_map.json\n\n"
-            "Default output: <input>_restored.csv"
+            "Default output: _restored.csv"
         ),
     )
     detokenize.add_argument(
@@ -816,7 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
     detokenize.add_argument(
         "--output",
         metavar="CSV",
-        help="Optional restored CSV path (default: <input>_restored.csv)",
+        help="Optional restored CSV path (default: _restored.csv)",
     )
     detokenize.add_argument(
         "--verbose",
@@ -830,7 +904,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional: check a local token map",
         description=(
             f"{BANNER}\n"
-            "Check that a local JSON map is readable and internally consistent."
+            "Check that a local token map is readable and internally consistent."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -841,12 +915,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local JSON token map to check",
     )
     validate.set_defaults(func=command_validate_map)
+
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
     try:
         args.func(args)
         return 0
