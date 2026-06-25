@@ -30,24 +30,31 @@ flowchart TD
     C --> D[Nmap Buddy CSV]
 
     A --> E[Identify web services]
-    E --> F[httpx output or URL list]
-    F --> G[Web SS Buddy]
-    G --> H[Web SS Buddy CSV]
-    G --> I[Local screenshots and PDF report]
+    E --> F[Run httpx]
+    F --> G[httpx output]
+    E --> H[Generate URL list]
 
-    J[Run Nessus] --> K[Nessus CSV]
+    G --> I[Web SS Buddy]
+    H --> I
+    I --> J[Web SS Buddy CSV]
+    I --> K[Local screenshots and PDF report]
 
-    D --> L[Token Buddy]
-    H --> L
-    K --> L
+    L[Run Nessus] --> M[Nessus CSV]
 
-    L --> M[Tokenized CSV files]
-    M --> N[AI-assisted processing]
-    N --> O[AI-generated CSV with placeholders]
+    N[Run other tools or scanners] --> O[CSV output]
 
-    O --> P[Token Buddy detokenize]
-    Q[Matching local JSON token map] --> P
-    P --> R[Restored final CSV]
+    D --> P[Token Buddy]
+    J --> P
+    M --> P
+    O --> P
+
+    P --> Q[Tokenized CSV files]
+    Q --> R[AI-assisted processing]
+    R --> S[AI-generated CSV with placeholders]
+
+    S --> T[Token Buddy detokenize]
+    U[Matching local JSON token map] --> T
+    T --> V[Restored final CSV]
 ```
 
 ## Features
