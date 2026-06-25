@@ -224,3 +224,5 @@ Host,Plugin Output,See Also
 * The `See Also` column remains unchanged so Tenable reference URLs are preserved.
 * Unknown placeholders are left unchanged during detokenization.
 * A whole-cell value that looks structurally like an FQDN, such as `archive.tar.gz`, may be tokenized as an FQDN.
+* Tokenization is automated on a best-effort basis. Review the output before sharing.
+
